@@ -92,3 +92,4 @@ ENV/
 *.iml
 .idea
 *-ubyte.gz
+.DS_Store
