@@ -1,3 +1,26 @@
+import numpy as np
+import cv2
+import glob
+import os
+import pickle
+
+"""
+    Pipeline Operations
+
+    Pipeline operations are the principle driving force for this project. Each implementation of `PipelineOp` is a modular, 
+    reusable algorithm which performs a single operation on an image. `PipelineOp` has a simple interface with 
+    only 3 steps to satisfy the contract:
+
+      1. Declare a constructor with inputs necessary to perform the operation in `#perform`.
+
+      2. Implement `#output` which returns the result of performing the operation in `#perform`.
+
+      3. Implement `#perform` ensuring that the last line is `return self`. 
+         This provides support to perform the op and immediately assign `#output` 
+         to local variables.
+
+"""
+
 class PipelineOp:
     def perform(self):
         raise NotImplementedError
@@ -7,7 +30,6 @@ class PipelineOp:
         Returns the result from performing this operation.
         """
         raise NotImplementedError
-
 
 class CameraCalibrationOp(PipelineOp):
     
@@ -52,26 +74,12 @@ class CameraCalibrationOp(PipelineOp):
         self.__apply_stage(self.STAGE_OBTAINED_CALIBRATION_IMAGES)
 
     def perform(self):
-        print(self)
-        
         self.__mode = self.MODE_CALIBRATING
-        print(self)
-        
         self.__compute_obj_and_img_points()
-        print(self)
-        
         self.__compute_camera_matrix_and_distortion_coefficients(self.__calibration_images[0])
-        print(self)
-        
         self.__save_calibration_mtx_and_dist()
-        print(self)
-        
         self.__undistort_chessboard_images()
-        print(self)
-        
         self.__mode = self.MODE_CALIBRATED
-        print(self)
-        
         return self
         
     def output(self):
@@ -127,7 +135,7 @@ class CameraCalibrationOp(PipelineOp):
                     self.__objpoints.append(objp)
                     self.__imgpoints.append(corners)
 
-                    print("{} corners detected".format(os.path.basename(fname)))
+                    # print("{} corners detected".format(os.path.basename(fname)))
                     calibrated_name = 'camera_cal/corners_found/{}'.format(str(os.path.basename(fname)))
                     cv2.drawChessboardCorners(img, (nx,ny), corners, ret)
                     cv2.imwrite(calibrated_name, img)
@@ -141,7 +149,7 @@ class CameraCalibrationOp(PipelineOp):
                 img = mpimg.imread(fname)
                 undistorted = self.undistort(img)
 
-                print("{} undistorted".format(os.path.basename(fname)))
+                # print("{} undistorted".format(os.path.basename(fname)))
                 undist_file = 'camera_cal/undistorted/{}'.format(os.path.basename(fname))
                 cv2.imwrite(undist_file, undistorted)
             
@@ -169,7 +177,7 @@ class CameraCalibrationOp(PipelineOp):
             dist_pickle["dist"] = self.__distortion_coefficients
             pickle.dump( dist_pickle, open( self.__calibration_results_pickle_file, "wb" ) )
 
-            print('camera matrix and distortion coefficients pickled to "{}" for later use'.format(self.__calibration_results_pickle_file))
+            # print('camera matrix and distortion coefficients pickled to "{}" for later use'.format(self.__calibration_results_pickle_file))
             
             self.__apply_stage(self.STAGE_SAVED_MTX_AND_DIST_CALIBRATIONS)
 
@@ -365,18 +373,27 @@ class WarperOp(PipelineOp):
         self.__img = np.copy(gray_img)
         self.__src_pts = src_pts
         self.__dst_pts = dst_pts
-        self.__transform_matrix = None
         self.__output = None
     
     def output(self):
         return self.__output
     
     def perform(self):
-        # use cv2.getPerspectiveTransform() to get M, the transform matrix
-        self.__transform_matrix = cv2.getPerspectiveTransform(self.__src_pts, self.__dst_pts)
-
-        # use cv2.warpPerspective() to warp the image to a top-down view
-        self.__output = cv2.warpPerspective(self.__img, self.__transform_matrix, self.__img.shape[0:2][::-1], flags=cv2.INTER_LINEAR)
+        # Compute the perspective transform, M, given source and destination points:
+        M = cv2.getPerspectiveTransform(self.__src_pts, self.__dst_pts)
+        
+        # Compute the inverse perspective transform:
+        Minv = cv2.getPerspectiveTransform(self.__dst_pts, self.__src_pts)
+        
+        # Warp an image using the perspective transform, M:
+        warped = cv2.warpPerspective(self.__img, M, self.__img.shape[0:2][::-1], flags=cv2.INTER_LINEAR)
+        
+        self.__output = {
+            'warped': warped,
+            'M': M, 
+            'Minv': Minv
+        }
+        
         return self
     
     def __str__(self):
@@ -402,38 +419,143 @@ class WarperOp(PipelineOp):
         s.append('   bot.R: '+str(self.__dst_pts[2]))
         s.append('   top.R: '+str(self.__dst_pts[3]))
         s.append('')
-        
-        s.append(' warped image shape: ')
-        s.append('')
-        if not self.__output is None:
-            s.append('   '+str(self.__output.shape))
-        else:
-            s.append('   '+str(None))
-        s.append('')
-        
-        s.append(' transform matrix: ')
-        s.append('')
-        s.append('   '+str(self.__transform_matrix))
-        s.append('')
-        s.append('')
-        
         s.append('')
         
         return '\n'.join(s)
-
-
+    
 class PlotImageOp(PipelineOp):
-    def __init__(self, img, cmap='gray', interpolation='none', aspect='auto'):
+    def __init__(self, img, title='', cmap='gray', interpolation='none', aspect='auto'):
         PipelineOp.__init__(self)
         self.__img = np.copy(img)
+        self.__title = title
         self.__cmap = cmap
         self.__interpolation = interpolation
         self.__aspect = aspect
+        self.__output = None
+        
+    def output(self):
+        return self.__output
 
     def perform(self):
-        fig1 = plt.figure(figsize=(10,8))
+        fig1 = plt.figure(figsize=(16,9))
         ax = fig1.add_subplot(111)
         ax.imshow(self.__img, cmap=self.__cmap, interpolation=self.__interpolation, aspect=self.__aspect)
         plt.tight_layout()
+        ax.set_title(self.__title)
         plt.show()
+        self.__output = ax
+        return self
+
+class DrawPolyLinesOp(PipelineOp):
+    def __init__(self, img, pts, color=(0, 140, 255), thickness=5):
+        PipelineOp.__init__(self)
+        self.__img = np.copy(img)
+        self.__pts = pts
+        self.__color = color
+        self.__thickness = thickness
+        self.__output = None
+    
+    def output(self):
+        return self.__output
+    
+    def perform(self):
+        self.__output = cv2.polylines(self.__img, [np.array([self.__pts], np.int32)], True, self.__color, thickness=self.__thickness)
+        return self
+    
+class PolyfitLineOp(PipelineOp):
+    def __init__(self, binary_warped):
+        PipelineOp.__init__(self)
+        self.__binary_warped = binary_warped
+        self.__output = None
+    
+    def output(self):
+        return self.__output
+    
+    def perform(self):
+        binary_warped = self.__binary_warped
+        
+        # Assuming you have created a warped binary image called "binary_warped"
+        # Take a histogram of the bottom half of the image
+        histogram = np.sum(binary_warped[binary_warped.shape[0]/2:,:], axis=0)
+
+        # Create an output image to draw on and  visualize the result
+        out_img = np.dstack((binary_warped, binary_warped, binary_warped))*255
+
+        # Find the peak of the left and right halves of the histogram
+        # These will be the starting point for the left and right lines
+        midpoint = np.int(histogram.shape[0]/2)
+        leftx_base = np.argmax(histogram[:midpoint])
+        rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+
+        # Choose the number of sliding windows
+        nwindows = 9
+        # Set height of windows
+        window_height = np.int(binary_warped.shape[0]/nwindows)
+        # Identify the x and y positions of all nonzero pixels in the image
+        nonzero = binary_warped.nonzero()
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+        # Current positions to be updated for each window
+        leftx_current = leftx_base
+        rightx_current = rightx_base
+        # Set the width of the windows +/- margin
+        margin = 100
+        # Set minimum number of pixels found to recenter window
+        minpix = 50
+        # Create empty lists to receive left and right lane pixel indices
+        left_lane_inds = []
+        right_lane_inds = []
+
+        # Step through the windows one by one
+        for window in range(nwindows):
+            # Identify window boundaries in x and y (and right and left)
+            win_y_low = binary_warped.shape[0] - (window+1)*window_height
+            win_y_high = binary_warped.shape[0] - window*window_height
+            win_xleft_low = leftx_current - margin
+            win_xleft_high = leftx_current + margin
+            win_xright_low = rightx_current - margin
+            win_xright_high = rightx_current + margin
+            # Draw the windows on the visualization image
+            cv2.rectangle(out_img,(win_xleft_low,win_y_low),(win_xleft_high,win_y_high),(0,255,0), 2) 
+            cv2.rectangle(out_img,(win_xright_low,win_y_low),(win_xright_high,win_y_high),(0,255,0), 2) 
+            # Identify the nonzero pixels in x and y within the window
+            good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
+            good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
+            # Append these indices to the lists
+            left_lane_inds.append(good_left_inds)
+            right_lane_inds.append(good_right_inds)
+            # If you found > minpix pixels, recenter next window on their mean position
+            if len(good_left_inds) > minpix:
+                leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+            if len(good_right_inds) > minpix:        
+                rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
+
+        # Concatenate the arrays of indices
+        left_lane_inds = np.concatenate(left_lane_inds)
+        right_lane_inds = np.concatenate(right_lane_inds)
+
+        # Extract left and right line pixel positions
+        leftx = nonzerox[left_lane_inds]
+        lefty = nonzeroy[left_lane_inds] 
+        rightx = nonzerox[right_lane_inds]
+        righty = nonzeroy[right_lane_inds] 
+
+        # Fit a second order polynomial to each
+        left_fit = np.polyfit(lefty, leftx, 2)
+        right_fit = np.polyfit(righty, rightx, 2)
+        
+        self.__output = {
+            'left_fit': left_fit,
+            'right_fit': right_fit,
+            'out_img': out_img,
+            'left_lane_inds': left_lane_inds,
+            'right_lane_inds': right_lane_inds,
+            'leftx': leftx,
+            'lefty': lefty,
+            'rightx': rightx,
+            'righty': righty,
+            'nonzerox': nonzerox,
+            'nonzeroy': nonzeroy
+        }
+        
         return self
