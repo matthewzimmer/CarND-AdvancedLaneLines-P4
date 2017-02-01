@@ -559,3 +559,177 @@ class PolyfitLineOp(PipelineOp):
         }
         
         return self
+
+
+class PipelineRunnerOp(PipelineOp):
+    def __init__(self, img, calibration_op):
+        PipelineOp.__init__(self)
+        self.__img = img
+        self.__calibration_op = calibration_op
+    
+    def output(self):
+        return self.__output
+    
+    def perform(self):
+        img = self.__img
+        
+        # UndistortOp
+        undistorted = UndistortOp(img, self.__calibration_op).perform().output()
+
+        ksize = 15
+        sobelx_thresh = (20, 100)
+        sobely_thresh = (20, 100)
+        mag_grad_thresh = (20, 250)
+        dir_grad_thresh = (0.3, 1.3)
+        
+        hls = ColorSpaceConvertOp(undistorted, color_space='hls', color_channel=2).perform().output()
+        gradx = SobelThreshOp(hls, orient='x', sobel_kernel=ksize, thresh=sobelx_thresh).perform().output()
+        grady = SobelThreshOp(hls, orient='y', sobel_kernel=ksize, thresh=sobely_thresh).perform().output()
+        mag_binary = MagnitudeGradientThreshOp(hls, sobel_kernel=ksize, thresh=mag_grad_thresh).perform().output()
+        dir_binary = DirectionGradientThreshOp(hls, sobel_kernel=ksize, thresh=dir_grad_thresh).perform().output()
+        combined = np.zeros_like(hls)
+        combined[((gradx == 1) & (grady == 1)) | ((mag_binary == 1) & (dir_binary == 1))] = 1
+
+        # combined warped
+        img_size = (img.shape[1], img.shape[0])
+        src_pts = np.float32(
+            [[(img_size[0] / 2) - 55, img_size[1] / 2 + 100],
+            [((img_size[0] / 6) + 15), img_size[1]],
+            [(img_size[0] * 5 / 6) + 90, img_size[1]],
+            [(img_size[0] / 2 + 85), img_size[1] / 2 + 100]])
+
+        dst_pts = np.float32(
+            [[(img_size[0] / 6), 0],
+            [(img_size[0] / 6), img_size[1]],
+            [(img_size[0] * 5 / 6), img_size[1]],
+            [(img_size[0] * 5 / 6), 0]])
+
+        warper_op = WarperOp(combined, src_pts, dst_pts).perform().output()
+        binary_warped = warper_op['warped']
+        
+        if True:
+            polyfit_op = PolyfitLineOp(binary_warped).perform().output()
+            left_fit = polyfit_op['left_fit']
+            right_fit = polyfit_op['right_fit']
+            nonzeroy = polyfit_op['nonzeroy']
+            nonzerox = polyfit_op['nonzerox']
+            left_lane_inds = polyfit_op['left_lane_inds']
+            right_lane_inds = polyfit_op['right_lane_inds']
+
+            # Generate x and y values for plotting
+            fity = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
+            fit_leftx = left_fit[0]*fity**2 + left_fit[1]*fity + left_fit[2]
+            fit_rightx = right_fit[0]*fity**2 + right_fit[1]*fity + right_fit[2]
+
+            out_img = polyfit_op['out_img']
+            out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
+            out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
+        
+        # Assume you now have a new warped binary image 
+        # from the next frame of video (also called "binary_warped")
+        # It's now much easier to find line pixels!
+        nonzero = binary_warped.nonzero()
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+        print(len(nonzeroy))
+        print(len(nonzerox))
+        margin = 150
+        left_lane_inds = ((nonzerox > (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] + margin))) 
+        right_lane_inds = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] + margin)))  
+
+        # Again, extract left and right line pixel positions
+        leftx = nonzerox[left_lane_inds]
+        lefty = nonzeroy[left_lane_inds] 
+        rightx = nonzerox[right_lane_inds]
+        righty = nonzeroy[right_lane_inds]
+        # Fit a second order polynomial to each
+        left_fit = np.polyfit(lefty, leftx, 2)
+        right_fit = np.polyfit(righty, rightx, 2)
+        # Generate x and y values for plotting
+        fity = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
+        fit_leftx = left_fit[0]*fity**2 + left_fit[1]*fity + left_fit[2]
+        fit_rightx = right_fit[0]*fity**2 + right_fit[1]*fity + right_fit[2]
+        
+        # Create an image to draw on and an image to show the selection window
+        out_img = np.dstack((binary_warped, binary_warped, binary_warped))*255
+        window_img = np.zeros_like(out_img)
+        # Color in left and right line pixels
+        out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
+        out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
+
+        # Generate a polygon to illustrate the search window area
+        # And recast the x and y points into usable format for cv2.fillPoly()
+        left_line_window1 = np.array([np.transpose(np.vstack([fit_leftx-margin, fity]))])
+        left_line_window2 = np.array([np.flipud(np.transpose(np.vstack([fit_leftx+margin, fity])))])
+        left_line_pts = np.hstack((left_line_window1, left_line_window2))
+        right_line_window1 = np.array([np.transpose(np.vstack([fit_rightx-margin, fity]))])
+        right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([fit_rightx+margin, fity])))])
+        right_line_pts = np.hstack((right_line_window1, right_line_window2))
+        
+        # Define y-value where we want radius of curvature
+        # I'll choose the maximum y-value, corresponding to the bottom of the image
+        y_eval = out_img.shape[0] 
+
+        left_curverad = ((1 + (2*left_fit[0]*y_eval + left_fit[1])**2)**1.5) / np.absolute(2*left_fit[0])
+        right_curverad = ((1 + (2*right_fit[0]*y_eval + right_fit[1])**2)**1.5) / np.absolute(2*right_fit[0])
+
+        print('left:', left_curverad, '| right:', right_curverad)
+        
+        # Define conversions in x and y from pixels space to meters
+        ym_per_pix = 30/out_img.shape[0] # meters per pixel in y dimension
+        xm_per_pix = 3.7/(out_img.shape[0]-20) # meteres per pixel in x dimension
+
+        left_fit_cr = np.polyfit(lefty*ym_per_pix, leftx*xm_per_pix, 2)
+        right_fit_cr = np.polyfit(righty*ym_per_pix, rightx*xm_per_pix, 2)
+
+        left_curverad = ((1 + (2*left_fit_cr[0]*y_eval + left_fit_cr[1])**2)**1.5) \
+                                     /np.absolute(2*left_fit_cr[0])
+        right_curverad = ((1 + (2*right_fit_cr[0]*y_eval + right_fit_cr[1])**2)**1.5) \
+                                        /np.absolute(2*right_fit_cr[0])
+        # Now our radius of curvature is in meters
+        print('left curve rad: {}m    |     right curve rad: {}m'.format(left_curverad, right_curverad))
+        
+        # Create an image to draw the lines on
+        warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
+        color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
+
+        # Recast the x and y points into usable format for cv2.fillPoly()
+        pts_left = np.array([np.transpose(np.vstack([fit_leftx, fity]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([fit_rightx, fity])))])
+        pts = np.hstack((pts_left, pts_right))
+
+        # Draw the lane onto the warped blank image
+        cv2.fillPoly(color_warp, np.int_([pts]), (0, 195, 255))
+
+        # Warp the blank back to original image space using inverse perspective matrix (Minv)
+        newwarp = cv2.warpPerspective(color_warp, warper_op['Minv'], (binary_warped.shape[1], binary_warped.shape[0])) 
+
+        # Combine the result with the original image
+        result = cv2.addWeighted(undistorted, 1, newwarp, 0.5, 0)
+        cv2.imwrite('detected_lanes/'+os.path.basename(test_image), cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+        
+        self.__output = result
+
+        return self
+
+
+current_frame = 0
+def process_image(image):
+    global current_frame, calibration_op
+    current_frame += 1
+    result = PipelineRunnerOp(image, calibration_op).perform().output()
+    # PlotImageOp(result, title="PipelineRunnerOp - Frame {}".format(current_frame)).perform()
+    return result
+
+# Import everything needed to edit/save/watch video clips
+from moviepy.editor import VideoFileClip
+
+src_video_path = 'project_video.mp4'
+dst_video_path = 'project_video_final.mp4'
+
+# test_image = 'test_images/curved-lane.jpg'
+# img = mpimg.imread(test_image)
+# result = process_image(img)
+# PlotImageOp(result, title="PipelineRunnerOp FINAL").perform()
+
+VideoFileClip(src_video_path).fl_image(process_image).write_videofile(dst_video_path, audio=False)
