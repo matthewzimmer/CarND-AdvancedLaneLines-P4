@@ -4,7 +4,7 @@ import math
 import matplotlib.image as mpimg
 import cv2
 
-from lane_assist_pipeline_operations import PipelineRunnerOp, CameraCalibrationOp, PlotImageOp
+from lane_assist_pipeline_ops import LaneDetectionPipelineOp, CameraCalibrationOp, PlotImageOp
 
 # Import everything needed to edit/save/watch video clips
 from moviepy.editor import VideoFileClip
@@ -55,7 +55,7 @@ class PipelineRunner:
         self.current_frame += 1
         cv2.imwrite('processed_images/frame_{}_in.jpg'.format(self.current_frame), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
-        result = PipelineRunnerOp(
+        result = LaneDetectionPipelineOp(
             image,
             self.__calibration_op,
             margin=100,
