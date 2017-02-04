@@ -4,7 +4,7 @@ import math
 import matplotlib.image as mpimg
 import cv2
 
-from pipeline_operations import PipelineRunnerOp, CameraCalibrationOp, PlotImageOp
+from lane_assist_pipeline_operations import PipelineRunnerOp, CameraCalibrationOp, PlotImageOp
 
 # Import everything needed to edit/save/watch video clips
 from moviepy.editor import VideoFileClip
