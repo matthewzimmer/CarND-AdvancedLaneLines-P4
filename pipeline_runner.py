@@ -1,3 +1,14 @@
+import numpy as np
+import glob
+import math
+import matplotlib.image as mpimg
+import cv2
+
+from pipeline_operations import PipelineRunnerOp, CameraCalibrationOp, PlotImageOp
+
+# Import everything needed to edit/save/watch video clips
+from moviepy.editor import VideoFileClip
+
 # This constant ultimately contributes to deriving a given
 # period when computing SMA and EMA for line noise smoothing
 FPS = 30
@@ -24,9 +35,9 @@ class LaneLine:
 
 
 class PipelineRunner:
-    def __init__(self,
-                 ema_period_alpha=0.65):
+    def __init__(self, calibration_op, ema_period_alpha=0.65):
         self.current_frame = 0
+        self.__calibration_op = calibration_op
 
         self.l_poly_coefficients = np.array([[],[],[]])
         self.l_ema = np.array([0,0,0])
@@ -42,7 +53,42 @@ class PipelineRunner:
 
     def process_image(self, image):
         self.current_frame += 1
-        return image
+        cv2.imwrite('processed_images/frame_{}_in.jpg'.format(self.current_frame), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+
+        result = PipelineRunnerOp(
+            image,
+            self.__calibration_op,
+            margin=100,
+            kernel_size=15,
+            sobelx_thresh=(20,100),
+            sobely_thresh=(20,100),
+            mag_grad_thresh=(20,250),
+            dir_grad_thresh=(0.3, 1.3)
+        ).perform().output()
+
+        cv2.imwrite('processed_images/frame_{}_out.jpg'.format(self.current_frame), cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+        # PlotImageOp(result, title="{} - frame {}".format(self.__class__.__name__, current_frame)).perform()
+        return result
+
+    def draw_lane(self, undistorted, binary_warped, fit_leftx, fit_rightx, fity, warper_op):
+        # Create an image to draw the lines on
+        warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
+        color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
+
+        # Recast the x and y points into usable format for cv2.fillPoly()
+        pts_left = np.array([np.transpose(np.vstack([fit_leftx, fity]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([fit_rightx, fity])))])
+        pts = np.hstack((pts_left, pts_right))
+
+        # Draw the lane onto the warped blank image
+        cv2.fillPoly(color_warp, np.int_([pts]), (0, 195, 255))
+
+        # Warp the blank back to original image space using inverse perspective matrix (Minv)
+        newwarp = cv2.warpPerspective(color_warp, warper_op['Minv'], (binary_warped.shape[1], binary_warped.shape[0]))
+
+        # Combine the result with the original image
+        result = cv2.addWeighted(undistorted, 1, newwarp, 0.5, 0)
+        cv2.imwrite('detected_lanes/frame_'+self.current_frame+'.jpg', cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
 
     def compute_ema(self, measurement, all_measurements, curr_ema):
         sma = sum(all_measurements) / (len(all_measurements))
@@ -85,22 +131,11 @@ class PipelineRunner:
 
         return a, b
 
-    def draw_lane(self, undistorted, binary_warped, fit_leftx, it_rightx, fity, warper_op):
-        # Create an image to draw the lines on
-        warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
-        color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
+if __name__ == '__main__':
+    calibration_images = glob.glob('camera_cal/calibration*.jpg')
+    calibration_op = CameraCalibrationOp(calibration_images=calibration_images, x_inside_corners=9, y_inside_corners=6).perform()
 
-        # Recast the x and y points into usable format for cv2.fillPoly()
-        pts_left = np.array([np.transpose(np.vstack([fit_leftx, fity]))])
-        pts_right = np.array([np.flipud(np.transpose(np.vstack([fit_rightx, fity])))])
-        pts = np.hstack((pts_left, pts_right))
+    pipeline_runner = PipelineRunner(calibration_op)
 
-        # Draw the lane onto the warped blank image
-        cv2.fillPoly(color_warp, np.int_([pts]), (0, 195, 255))
-
-        # Warp the blank back to original image space using inverse perspective matrix (Minv)
-        newwarp = cv2.warpPerspective(color_warp, warper_op['Minv'], (binary_warped.shape[1], binary_warped.shape[0])) 
-
-        # Combine the result with the original image
-        result = cv2.addWeighted(undistorted, 1, newwarp, 0.5, 0)
-        cv2.imwrite('detected_lanes/frame_'+self.current_frame+'.jpg', cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
+    result = pipeline_runner.process_image(mpimg.imread('test_images/frame_9_in.jpg'))
+    # pipeline_runner.process_video('project_video.mp4', 'project_video_final.mp4')

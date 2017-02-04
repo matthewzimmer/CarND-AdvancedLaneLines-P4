@@ -3,6 +3,8 @@ import cv2
 import glob
 import os
 import pickle
+import matplotlib.image as mpimg
+import matplotlib.pyplot as plt
 
 """
     Pipeline Operations
@@ -76,9 +78,11 @@ class CameraCalibrationOp(PipelineOp):
     def perform(self):
         self.__mode = self.MODE_CALIBRATING
         self.__compute_obj_and_img_points()
-        self.__compute_camera_matrix_and_distortion_coefficients(self.__calibration_images[0])
-        self.__save_calibration_mtx_and_dist()
-        self.__undistort_chessboard_images()
+        calibrations = self.__load_calibrations()
+        if calibrations is False:
+            self.__compute_camera_matrix_and_distortion_coefficients(self.__calibration_images[0])
+            self.__save_calibration_mtx_and_dist()
+        # self.__undistort_chessboard_images()
         self.__mode = self.MODE_CALIBRATED
         return self
         
@@ -154,7 +158,19 @@ class CameraCalibrationOp(PipelineOp):
                 cv2.imwrite(undist_file, undistorted)
             
             self.__apply_stage(self.STAGE_UNDISTORED_CALIBRATION_IMAGES)
-    
+
+    def __load_calibrations(self):
+        if os.path.isfile(self.__calibration_results_pickle_file):
+            with open(self.__calibration_results_pickle_file, 'rb') as f:
+                pickle_data = pickle.load(f)
+                self.__camera_matrix = pickle_data['mtx']
+                self.__distortion_coefficients = pickle_data['dist']
+                if self.__camera_matrix is not None:
+                    self.__apply_stage(self.STAGE_CALCULATED_CAMERA_MTX_AND_DIST_COEFFICIENTS)
+                    self.__apply_stage(self.STAGE_SAVED_MTX_AND_DIST_CALIBRATIONS)
+                    return True
+        return False
+
     def __compute_camera_matrix_and_distortion_coefficients(self, distorted_image_path):
         if self.__is_stage_complete(self.STAGE_COMPUTED_OBJ_AND_IMG_POINTS) and not self.__is_stage_complete(self.STAGE_CALCULATED_CAMERA_MTX_AND_DIST_COEFFICIENTS):
             fname = distorted_image_path
@@ -562,35 +578,55 @@ class PolyfitLineOp(PipelineOp):
 
 
 class PipelineRunnerOp(PipelineOp):
-    def __init__(self, img, calibration_op):
+    def __init__(self, img, calibration_op, margin=100, kernel_size=3, sobelx_thresh=(20,100), sobely_thresh=(20,100), mag_grad_thresh=(20,250), dir_grad_thresh=(0., np.pi/2)):
         PipelineOp.__init__(self)
         self.__img = img
+        self.__margin = margin
         self.__calibration_op = calibration_op
+        self.__parameters = {
+            'kernel_size': kernel_size,
+            'sobelx_thresh': sobelx_thresh,
+            'sobely_thresh': sobely_thresh,
+            'mag_grad_thresh': mag_grad_thresh,
+            'dir_grad_thresh': dir_grad_thresh
+        }
     
     def output(self):
         return self.__output
     
     def perform(self):
         img = self.__img
-        
-        # UndistortOp
+        kernel_size = self.__parameters['kernel_size']
+        sobelx_thresh = self.__parameters['sobelx_thresh']
+        sobely_thresh = self.__parameters['sobely_thresh']
+        mag_grad_thresh = self.__parameters['mag_grad_thresh']
+        dir_grad_thresh = self.__parameters['dir_grad_thresh']
+
+        # undistort the raw image
         undistorted = UndistortOp(img, self.__calibration_op).perform().output()
 
-        ksize = 15
-        sobelx_thresh = (20, 100)
-        sobely_thresh = (20, 100)
-        mag_grad_thresh = (20, 250)
-        dir_grad_thresh = (0.3, 1.3)
-        
+        # Convert undistored image to HLS and use the 'S' channel as our gray image.
         hls = ColorSpaceConvertOp(undistorted, color_space='hls', color_channel=2).perform().output()
-        gradx = SobelThreshOp(hls, orient='x', sobel_kernel=ksize, thresh=sobelx_thresh).perform().output()
-        grady = SobelThreshOp(hls, orient='y', sobel_kernel=ksize, thresh=sobely_thresh).perform().output()
-        mag_binary = MagnitudeGradientThreshOp(hls, sobel_kernel=ksize, thresh=mag_grad_thresh).perform().output()
-        dir_binary = DirectionGradientThreshOp(hls, sobel_kernel=ksize, thresh=dir_grad_thresh).perform().output()
+
+        # Compute sobel X binary image
+        gradx = SobelThreshOp(hls, orient='x', sobel_kernel=kernel_size, thresh=sobelx_thresh).perform().output()
+
+        # Compute sobel Y binary image
+        grady = SobelThreshOp(hls, orient='y', sobel_kernel=kernel_size, thresh=sobely_thresh).perform().output()
+
+        # Compute Magnitude Gradient binary image
+        mag_binary = MagnitudeGradientThreshOp(hls, sobel_kernel=kernel_size, thresh=mag_grad_thresh).perform().output()
+
+        # Compute Direction Gradient binary image
+        dir_binary = DirectionGradientThreshOp(hls, sobel_kernel=kernel_size, thresh=dir_grad_thresh).perform().output()
+
+        # Perform bitwise AND and OR where to create a final binary image where we generate a binary image of
+        # all white pixels in (SobelX AND SobelY) and combine it via binary OR with a binary image of all white pixels
+        # in (Magnitude AND Direction) gradients.
         combined = np.zeros_like(hls)
         combined[((gradx == 1) & (grady == 1)) | ((mag_binary == 1) & (dir_binary == 1))] = 1
 
-        # combined warped
+        # Now we're going to warp our combined threshholded binary image
         img_size = (img.shape[1], img.shape[0])
         src_pts = np.float32(
             [[(img_size[0] / 2) - 55, img_size[1] / 2 + 100],
@@ -633,7 +669,7 @@ class PipelineRunnerOp(PipelineOp):
         nonzerox = np.array(nonzero[1])
         print(len(nonzeroy))
         print(len(nonzerox))
-        margin = 150
+        margin = self.__margin
         left_lane_inds = ((nonzerox > (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] + margin))) 
         right_lane_inds = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] + margin)))  
 
@@ -706,30 +742,7 @@ class PipelineRunnerOp(PipelineOp):
 
         # Combine the result with the original image
         result = cv2.addWeighted(undistorted, 1, newwarp, 0.5, 0)
-        cv2.imwrite('detected_lanes/'+os.path.basename(test_image), cv2.cvtColor(result, cv2.COLOR_RGB2BGR))
-        
+
         self.__output = result
 
         return self
-
-
-current_frame = 0
-def process_image(image):
-    global current_frame, calibration_op
-    current_frame += 1
-    result = PipelineRunnerOp(image, calibration_op).perform().output()
-    # PlotImageOp(result, title="PipelineRunnerOp - Frame {}".format(current_frame)).perform()
-    return result
-
-# Import everything needed to edit/save/watch video clips
-from moviepy.editor import VideoFileClip
-
-src_video_path = 'project_video.mp4'
-dst_video_path = 'project_video_final.mp4'
-
-# test_image = 'test_images/curved-lane.jpg'
-# img = mpimg.imread(test_image)
-# result = process_image(img)
-# PlotImageOp(result, title="PipelineRunnerOp FINAL").perform()
-
-VideoFileClip(src_video_path).fl_image(process_image).write_videofile(dst_video_path, audio=False)
