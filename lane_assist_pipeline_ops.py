@@ -9,7 +9,32 @@ import numpy as np
 from pipeline_ops import PipelineOp
 
 
-class LaneDetectionPipelineOp(PipelineOp):
+# Define a class to receive the characteristics of each line detection
+class Line():
+    def __init__(self):
+        # was the line detected in the last iteration?
+        self.detected = False  
+        # x values of the last n fits of the line
+        self.recent_xfitted = [] 
+        #average x values of the fitted line over the last n iterations
+        self.bestx = None     
+        #polynomial coefficients averaged over the last n iterations
+        self.best_fit = None  
+        #polynomial coefficients for the most recent fit
+        self.current_fit = [np.array([False])]  
+        #radius of curvature of the line in some units
+        self.radius_of_curvature = None 
+        #distance in meters of vehicle center from the line
+        self.line_base_pos = None 
+        #difference in fit coefficients between last and new fits
+        self.diffs = np.array([0,0,0], dtype='float') 
+        #x values for detected line pixels
+        self.allx = None  
+        #y values for detected line pixels
+        self.ally = None
+
+
+class LaneAssistOp(PipelineOp):
 	def __init__(self, img, calibration_op, margin=100, kernel_size=3, sobelx_thresh=(20, 100), sobely_thresh=(20, 100),
 	             mag_grad_thresh=(20, 250), dir_grad_thresh=(0., np.pi / 2)):
 		PipelineOp.__init__(self)
@@ -24,9 +49,6 @@ class LaneDetectionPipelineOp(PipelineOp):
 			'dir_grad_thresh': dir_grad_thresh
 		}
 
-	def output(self):
-		return self.__output
-
 	def perform(self):
 		img = self.__img
 		kernel_size = self.__parameters['kernel_size']
@@ -39,7 +61,7 @@ class LaneDetectionPipelineOp(PipelineOp):
 		undistorted = UndistortOp(img, self.__calibration_op).perform().output()
 
 		# Convert undistored image to HLS and use the 'S' channel as our gray image.
-		hls = ColorSpaceConvertOp(undistorted, color_space='hls', color_channel=2).perform().output()
+		hls = ConvertColorSpaceOp(undistorted, color_space='hls', color_channel=2).perform().output()
 
 		# Compute sobel X binary image
 		gradx = SobelThreshOp(hls, orient='x', sobel_kernel=kernel_size, thresh=sobelx_thresh).perform().output()
@@ -73,6 +95,23 @@ class LaneDetectionPipelineOp(PipelineOp):
 			 [(img_size[0] * 5 / 6), img_size[1]],
 			 [(img_size[0] * 5 / 6), 0]])
 
+		src_pts = np.float32(
+		    [[605, 460],
+		    [268, 720],
+		    [1157, 720],
+		    [725, 460]])
+
+		dst_pts = np.float32(
+		    [[(img_size[0] / 6), 0],
+		    [(img_size[0] / 6), img_size[1]],
+		    [(img_size[0] * 5 / 6), img_size[1]],
+		    [(img_size[0] * 5 / 6), 0]])
+
+		# define 4 source points for perspective transformation
+		src_pts = np.float32([[220,719],[1220,719],[750,480],[550,480]])
+		# define 4 destination points for perspective transformation
+		dst_pts = np.float32([[240,719],[1040,719],[1040,0],[240,0]])
+
 		warper_op = WarperOp(combined, src_pts, dst_pts).perform().output()
 		binary_warped = warper_op['warped']
 
@@ -100,8 +139,8 @@ class LaneDetectionPipelineOp(PipelineOp):
 		nonzero = binary_warped.nonzero()
 		nonzeroy = np.array(nonzero[0])
 		nonzerox = np.array(nonzero[1])
-		print(len(nonzeroy))
-		print(len(nonzerox))
+		#print(len(nonzeroy))
+		#print(len(nonzerox))
 		margin = self.__margin
 		left_lane_inds = (
 		(nonzerox > (left_fit[0] * (nonzeroy ** 2) + left_fit[1] * nonzeroy + left_fit[2] - margin)) & (
@@ -146,7 +185,7 @@ class LaneDetectionPipelineOp(PipelineOp):
 		left_curverad = ((1 + (2 * left_fit[0] * y_eval + left_fit[1]) ** 2) ** 1.5) / np.absolute(2 * left_fit[0])
 		right_curverad = ((1 + (2 * right_fit[0] * y_eval + right_fit[1]) ** 2) ** 1.5) / np.absolute(2 * right_fit[0])
 
-		print('left:', left_curverad, '| right:', right_curverad)
+		#print('left:', left_curverad, '| right:', right_curverad)
 
 		# Define conversions in x and y from pixels space to meters
 		ym_per_pix = 30 / out_img.shape[0]  # meters per pixel in y dimension
@@ -160,7 +199,7 @@ class LaneDetectionPipelineOp(PipelineOp):
 		right_curverad = ((1 + (2 * right_fit_cr[0] * y_eval + right_fit_cr[1]) ** 2) ** 1.5) \
 		                 / np.absolute(2 * right_fit_cr[0])
 		# Now our radius of curvature is in meters
-		print('left curve rad: {}m    |     right curve rad: {}m'.format(left_curverad, right_curverad))
+		#print('left curve rad: {}m    |     right curve rad: {}m'.format(left_curverad, right_curverad))
 
 		# Create an image to draw the lines on
 		warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
@@ -180,9 +219,7 @@ class LaneDetectionPipelineOp(PipelineOp):
 		# Combine the result with the original image
 		result = cv2.addWeighted(undistorted, 1, newwarp, 0.5, 0)
 
-		self.__output = result
-
-		return self
+		return self._apply_output(result)
 
 
 class CameraCalibrationOp(PipelineOp):
@@ -236,15 +273,12 @@ class CameraCalibrationOp(PipelineOp):
 			self.__save_calibration_mtx_and_dist()
 		# self.__undistort_chessboard_images()
 		self.__mode = self.MODE_CALIBRATED
-		return self
-
-	def output(self):
-		return {
+		return self._apply_output({
 			'matrix': self.__camera_matrix,
 			'dist_coefficients': self.__distortion_coefficients,
 			'objpoints': self.__objpoints,
 			'imgpoints': self.__imgpoints
-		}
+		})
 
 	def undistort(self, img):
 		"""
@@ -404,35 +438,24 @@ class CameraCalibrationOp(PipelineOp):
 		return '\n'.join(s)
 
 
-class ColorSpaceConvertOp(PipelineOp):
-	def __init__(self, img, color_space, color_channel=-1):
-		"""
-		Converts an image to a different color space.
-
-		Available color spaces: HSV, HLS, YUV, GRAY
-		"""
-		PipelineOp.__init__(self)
-		self.__img = np.copy(img)
-		self.__color_space = color_space
-		self.__color_channel = color_channel
-		self.__output = None
-
-	def output(self):
-		return self.__output
-
-	def perform(self):
-		if self.__color_space.lower() == 'hsv':
-			img = cv2.cvtColor(self.__img, cv2.COLOR_RGB2HSV).astype(np.float)
-		if self.__color_space.lower() == 'hls':
-			img = cv2.cvtColor(self.__img, cv2.COLOR_RGB2HLS).astype(np.float)
-		if self.__color_space.lower() == 'yuv':
-			img = cv2.cvtColor(self.__img, cv2.COLOR_RGB2YUV).astype(np.float)
-		if self.__color_space.lower() == 'gray':
-			img = cv2.cvtColor(self.__img, cv2.COLOR_RGB2GRAY).astype(np.float)
-		if self.__color_channel > -1:
-			img = img[:, :, self.__color_channel]
-		self.__output = img
-		return self
+class ConvertColorSpaceOp(PipelineOp):
+    def __init__(self, img, color_space, src_color_space='RGB', color_channel=-1):
+        """
+        Converts an image to a different color space.
+        
+        Available color spaces: HSV, HLS, YUV, GRAY
+        """
+        PipelineOp.__init__(self)
+        self.__img = np.copy(img)
+        self.__color_space = color_space.upper()
+        self.__src_color_space = src_color_space.upper()
+        self.__color_channel = color_channel
+    
+    def perform(self):
+        img = cv2.cvtColor(self.__img, eval('cv2.COLOR_{}2{}'.format(self.__src_color_space, self.__color_space))).astype(np.float)
+        if self.__color_channel > -1:
+            img = img[:,:,self.__color_channel]
+        return self._apply_output(img)
 
 
 class ColorThreshOp(PipelineOp):
@@ -440,10 +463,6 @@ class ColorThreshOp(PipelineOp):
 		PipelineOp.__init__(self)
 		self.__img = np.copy(gray_img)
 		self.__color_thresh = color_thresh
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
 		# ret, thresholded_img = cv2.threshold(img.astype('uint8'), self._color_thresh[0], self._color_thresh[1], cv2.THRESH_BINARY)
@@ -451,8 +470,7 @@ class ColorThreshOp(PipelineOp):
 		# self._binary_img = binary_img
 		binary = np.zeros_like(self.__img)
 		binary[(self.__img > self.__color_thresh[0]) & (self.__img <= self.__color_thresh[1])] = 1
-		self.__output = binary
-		return self
+		return self._apply_output(binary)
 
 
 class UndistortOp(PipelineOp):
@@ -463,14 +481,9 @@ class UndistortOp(PipelineOp):
 		PipelineOp.__init__(self)
 		self.__img = np.copy(img)
 		self.__camera_calibration_op = camera_calibration_op
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
-		self.__output = self.__camera_calibration_op.undistort(self.__img)
-		return self
+		return self._apply_output(self.__camera_calibration_op.undistort(self.__img))
 
 
 class SobelThreshOp(PipelineOp):
@@ -480,10 +493,6 @@ class SobelThreshOp(PipelineOp):
 		self.__orient = orient
 		self.__sobel_kernel = sobel_kernel  # Choose a larger odd number to smooth gradient measurements
 		self.__thresh = thresh
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
 		gray = self.__img
@@ -492,8 +501,7 @@ class SobelThreshOp(PipelineOp):
 		scaled_sobel = (255 * abs_sobel / np.max(abs_sobel)).astype(np.uint8)
 		binary = np.zeros_like(scaled_sobel)
 		binary[(scaled_sobel >= self.__thresh[0]) & (scaled_sobel <= self.__thresh[1])] = 1
-		self.__output = binary
-		return self
+		return self._apply_output(binary)
 
 
 class MagnitudeGradientThreshOp(PipelineOp):
@@ -502,10 +510,6 @@ class MagnitudeGradientThreshOp(PipelineOp):
 		self.__img = np.copy(gray_img)
 		self.__sobel_kernel = sobel_kernel  # Choose a larger odd number to smooth gradient measurements
 		self.__thresh = thresh
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
 		gray = self.__img
@@ -515,8 +519,7 @@ class MagnitudeGradientThreshOp(PipelineOp):
 		gradmag = (255 * gradmag / np.max(gradmag)).astype(np.uint8)
 		binary = np.zeros_like(gradmag)
 		binary[(gradmag >= self.__thresh[0]) & (gradmag <= self.__thresh[1])] = 1
-		self.__output = binary
-		return self
+		return self._apply_output(binary)
 
 
 class DirectionGradientThreshOp(PipelineOp):
@@ -529,10 +532,6 @@ class DirectionGradientThreshOp(PipelineOp):
 		self.__img = np.copy(gray_img)
 		self.__sobel_kernel = sobel_kernel  # Choose a larger odd number to smooth gradient measurements
 		self.__thresh = thresh
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
 		sobelx = cv2.Sobel(self.__img, cv2.CV_64F, 1, 0, ksize=self.__sobel_kernel)
@@ -541,8 +540,7 @@ class DirectionGradientThreshOp(PipelineOp):
 			abs_grad_dir = np.absolute(np.arctan(sobely / sobelx))
 			binary = np.zeros_like(abs_grad_dir)
 			binary[(abs_grad_dir > self.__thresh[0]) & (abs_grad_dir < self.__thresh[1])] = 1
-		self.__output = binary
-		return self
+		return self._apply_output(binary)
 
 
 class WarperOp(PipelineOp):
@@ -551,10 +549,6 @@ class WarperOp(PipelineOp):
 		self.__img = np.copy(gray_img)
 		self.__src_pts = src_pts
 		self.__dst_pts = dst_pts
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
 		# Compute the perspective transform, M, given source and destination points:
@@ -566,13 +560,11 @@ class WarperOp(PipelineOp):
 		# Warp an image using the perspective transform, M:
 		warped = cv2.warpPerspective(self.__img, M, self.__img.shape[0:2][::-1], flags=cv2.INTER_LINEAR)
 
-		self.__output = {
+		return self._apply_output({
 			'warped': warped,
 			'M': M,
 			'Minv': Minv
-		}
-
-		return self
+		})
 
 	def __str__(self):
 		s = []
@@ -610,10 +602,6 @@ class PlotImageOp(PipelineOp):
 		self.__cmap = cmap
 		self.__interpolation = interpolation
 		self.__aspect = aspect
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
 		fig1 = plt.figure(figsize=(16, 9))
@@ -622,8 +610,7 @@ class PlotImageOp(PipelineOp):
 		plt.tight_layout()
 		ax.set_title(self.__title)
 		plt.show()
-		self.__output = ax
-		return self
+		return self._apply_output(ax)
 
 
 class DrawPolyLinesOp(PipelineOp):
@@ -633,25 +620,16 @@ class DrawPolyLinesOp(PipelineOp):
 		self.__pts = pts
 		self.__color = color
 		self.__thickness = thickness
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
-		self.__output = cv2.polylines(self.__img, [np.array([self.__pts], np.int32)], True, self.__color,
-		                              thickness=self.__thickness)
-		return self
+		return self._apply_output(cv2.polylines(self.__img, [np.array([self.__pts], np.int32)], True, self.__color,
+		                              thickness=self.__thickness))
 
 
 class PolyfitLineOp(PipelineOp):
 	def __init__(self, binary_warped):
 		PipelineOp.__init__(self)
 		self.__binary_warped = binary_warped
-		self.__output = None
-
-	def output(self):
-		return self.__output
 
 	def perform(self):
 		binary_warped = self.__binary_warped
@@ -728,7 +706,7 @@ class PolyfitLineOp(PipelineOp):
 		left_fit = np.polyfit(lefty, leftx, 2)
 		right_fit = np.polyfit(righty, rightx, 2)
 
-		self.__output = {
+		return self._apply_output({
 			'left_fit': left_fit,
 			'right_fit': right_fit,
 			'out_img': out_img,
@@ -740,6 +718,4 @@ class PolyfitLineOp(PipelineOp):
 			'righty': righty,
 			'nonzerox': nonzerox,
 			'nonzeroy': nonzeroy
-		}
-
-		return self
+		})
